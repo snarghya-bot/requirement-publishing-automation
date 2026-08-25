@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
@@ -16,6 +17,39 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+// ---------------------------------------------------------------------------------
+// Optional shared-secret auth guard for mutating / execution endpoints.
+//
+// /api/run-python spawns an arbitrary server-supplied Python script with real
+// CRUSTDATA_API_KEY / GEMINI_API_KEY injected into its environment. The /api/roles
+// and /api/companies write endpoints mutate JSON files on disk. None of this was
+// previously authenticated at all. Setting INTERNAL_API_TOKEN turns on enforcement;
+// leaving it unset keeps today's unauthenticated local-dev behavior (with a startup
+// warning) so this doesn't break anyone running purely on localhost.
+// ---------------------------------------------------------------------------------
+const INTERNAL_API_TOKEN = (process.env.INTERNAL_API_TOKEN || '').trim();
+
+if (!INTERNAL_API_TOKEN) {
+  console.warn(
+    '[SECURITY WARNING] INTERNAL_API_TOKEN is not set. /api/run-python (arbitrary server-side ' +
+    'Python execution with your API keys) and the roles/companies write endpoints are ' +
+    'UNAUTHENTICATED. This is fine for local-only development, but do NOT deploy this server ' +
+    'to a public URL (e.g. Cloud Run) without setting INTERNAL_API_TOKEN in the environment.'
+  );
+}
+
+function requireInternalToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!INTERNAL_API_TOKEN) return next();
+  const provided = (req.get('x-internal-token') || '').trim();
+  if (provided !== INTERNAL_API_TOKEN) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized: missing or invalid x-internal-token header. Set INTERNAL_API_TOKEN on the server and provide it via the API Credentials modal.',
+    });
+  }
+  next();
+}
 
 // Quota and Rate Limit Tracker for Gemini Free Tier
 interface ModelQuotaDef {
@@ -34,9 +68,19 @@ const MODEL_QUOTA_DEFS: Record<string, ModelQuotaDef> = {
     dailyLimit: 1500,
     rpmLimit: 15,
     tpmLimit: 1000000,
-    description: 'Ultra-low latency lightweight intelligence engine (1,500 RPD free tier)',
+    description: 'Ultra-low latency lightweight intelligence engine (1,500 RPD free tier); primary model',
+  },
+  'gemini-2.5-flash': {
+    model: 'gemini-2.5-flash',
+    displayName: 'Gemini 2.5 Flash',
+    dailyLimit: 1500,
+    rpmLimit: 15,
+    tpmLimit: 1000000,
+    description: 'Automatic failover model used when Gemini 3.1 Flash-Lite is rate-limited or unavailable',
   },
 };
+
+const KNOWN_GEMINI_MODELS = Object.keys(MODEL_QUOTA_DEFS);
 
 interface RequestLogEntry {
   id: string;
@@ -47,10 +91,12 @@ interface RequestLogEntry {
   error?: string;
 }
 
+function freshDailyCounts(): Record<string, number> {
+  return KNOWN_GEMINI_MODELS.reduce((acc, m) => ({ ...acc, [m]: 0 }), {} as Record<string, number>);
+}
+
 class GeminiQuotaTracker {
-  private dailyCounts: Record<string, number> = {
-    'gemini-3.1-flash-lite': 0,
-  };
+  private dailyCounts: Record<string, number> = freshDailyCounts();
   private requestHistory: RequestLogEntry[] = [];
   private currentDayUTC: string = new Date().toISOString().split('T')[0];
   private lastRateLimitError: { timestamp: number; model: string; error: string } | null = null;
@@ -63,16 +109,14 @@ class GeminiQuotaTracker {
     const today = new Date().toISOString().split('T')[0];
     if (today !== this.currentDayUTC) {
       this.currentDayUTC = today;
-      this.dailyCounts = {
-        'gemini-3.1-flash-lite': 0,
-      };
+      this.dailyCounts = freshDailyCounts();
       this.lastRateLimitError = null;
     }
   }
 
   public recordRequest(model: string, success: boolean, status: number, error?: string) {
     this.checkDayRoll();
-    const normalizedModel = 'gemini-3.1-flash-lite';
+    const normalizedModel = KNOWN_GEMINI_MODELS.includes(model) ? model : 'gemini-3.1-flash-lite';
     this.dailyCounts[normalizedModel] = (this.dailyCounts[normalizedModel] || 0) + 1;
 
     const logEntry: RequestLogEntry = {
@@ -99,12 +143,7 @@ class GeminiQuotaTracker {
   }
 
   public resetCounters() {
-    this.dailyCounts = {
-      'gemini-3.7-flash': 0,
-      'gemini-2.5-flash': 0,
-      'gemini-2.0-flash': 0,
-      'gemini-3.1-flash-lite': 0,
-    };
+    this.dailyCounts = freshDailyCounts();
     this.lastRateLimitError = null;
     this.requestHistory = [];
   }
@@ -210,14 +249,14 @@ app.post('/api/test-keys', async (req, res) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch('https://api.crustdata.com/person/search', {
+      const response = await fetch('https://api.crustdata.com/screener/persondb/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Token ${effectiveCrustKey}`,
         },
         body: JSON.stringify({
-          query: 'Software Engineer',
+          filters: { filter_type: 'current_title', type: '(.)', value: 'Software Engineer' },
           limit: 1,
         }),
         signal: controller.signal,
@@ -266,7 +305,7 @@ app.post('/api/test-keys', async (req, res) => {
   const effectiveGeminiKey = geminiApiKey?.trim() || process.env.GEMINI_API_KEY;
   if (effectiveGeminiKey) {
     const startTime = Date.now();
-    const candidateModels = ['gemini-3.1-flash-lite'];
+    const candidateModels = ['gemini-3.1-flash-lite', 'gemini-2.5-flash'];
     let verifiedModel = '';
     let lastErrorMsg = '';
 
@@ -410,7 +449,7 @@ app.get('/api/roles', (req, res) => {
   });
 });
 
-app.post('/api/roles/save', (req, res) => {
+app.post('/api/roles/save', requireInternalToken, (req, res) => {
   const { roleConfig } = req.body;
   if (!roleConfig || !roleConfig.role) {
     return res.status(400).json({ success: false, error: 'Invalid roleConfig payload' });
@@ -429,7 +468,7 @@ app.post('/api/roles/save', (req, res) => {
   });
 });
 
-app.post('/api/roles/delete', (req, res) => {
+app.post('/api/roles/delete', requireInternalToken, (req, res) => {
   const { roleName } = req.body;
   if (!roleName) {
     return res.status(400).json({ success: false, error: 'roleName is required' });
@@ -444,7 +483,7 @@ app.post('/api/roles/delete', (req, res) => {
   });
 });
 
-app.post('/api/roles/reset', (req, res) => {
+app.post('/api/roles/reset', requireInternalToken, (req, res) => {
   const { roleName } = req.body;
   if (!roleName) {
     return res.status(400).json({ success: false, error: 'roleName is required' });
@@ -467,7 +506,7 @@ app.get('/api/companies', (req, res) => {
   });
 });
 
-app.post('/api/companies/save', (req, res) => {
+app.post('/api/companies/save', requireInternalToken, (req, res) => {
   const { company } = req.body;
   if (!company || !company.name || typeof company.name !== 'string') {
     return res.status(400).json({ success: false, error: 'Invalid company payload' });
@@ -506,7 +545,7 @@ app.post('/api/companies/save', (req, res) => {
   });
 });
 
-app.post('/api/companies/delete', (req, res) => {
+app.post('/api/companies/delete', requireInternalToken, (req, res) => {
   const { companyName } = req.body;
   if (!companyName) {
     return res.status(400).json({ success: false, error: 'companyName is required' });
@@ -524,7 +563,7 @@ app.post('/api/companies/delete', (req, res) => {
   });
 });
 
-app.post('/api/companies/reset', (req, res) => {
+app.post('/api/companies/reset', requireInternalToken, (req, res) => {
   serverCompaniesDb = [];
   saveCompaniesDb(serverCompaniesDb);
 
@@ -583,37 +622,28 @@ app.post('/api/live-source', async (req, res) => {
   let sourcingSucceeded = false;
 
   if (effectiveCrustKey) {
-    const authHeader = effectiveCrustKey.startsWith('Token ') || effectiveCrustKey.startsWith('Bearer ')
-      ? effectiveCrustKey
-      : `Token ${effectiveCrustKey}`;
+    // Documented Crustdata contract: POST /screener/persondb/search, "Authorization: Token <key>",
+    // filter objects keyed by "filter_type" (not "field"), inside a top-level "filters" object.
+    const authHeader = `Token ${effectiveCrustKey.replace(/^(Token|Bearer)\s+/i, '')}`;
 
-    // Candidate search strategies to try on Crustdata
+    const conditions: any[] = [
+      { filter_type: 'current_title', type: '(.)', value: role },
+    ];
+    if (location && location !== 'Remote / Any') {
+      conditions.push({ filter_type: 'region', type: '=', value: location });
+    }
+    if (targetCompanies.length > 0) {
+      conditions.push({ filter_type: 'current_employers.company_name', type: 'in', value: targetCompanies });
+    }
+    if (mustHaveSkills.length > 0) {
+      conditions.push({ filter_type: 'skills', type: 'in', value: mustHaveSkills.slice(0, 8) });
+    }
+
     const strategies = [
       {
-        url: 'https://api.crustdata.com/person/search',
+        url: 'https://api.crustdata.com/screener/persondb/search',
         payload: {
-          filters: [
-            { filter_type: 'CURRENT_TITLE', type: 'in', value: [role] },
-            ...(location && location !== 'Remote / Any' ? [{ filter_type: 'REGION', type: 'in', value: [location] }] : []),
-            ...(targetCompanies.length > 0 ? [{ filter_type: 'CURRENT_COMPANY', type: 'in', value: targetCompanies }] : []),
-          ],
-          limit: 50,
-        },
-      },
-      {
-        url: 'https://api.crustdata.com/screener/person/search',
-        payload: {
-          filters: [
-            { filter_type: 'CURRENT_TITLE', type: 'in', value: [role] },
-            ...(location && location !== 'Remote / Any' ? [{ filter_type: 'REGION', type: 'in', value: [location] }] : []),
-          ],
-          limit: 50,
-        },
-      },
-      {
-        url: 'https://api.crustdata.com/person/search',
-        payload: {
-          query: `${role} ${mustHaveSkills.slice(0, 3).join(' ')} ${location !== 'Remote / Any' ? location : ''}`.trim(),
+          filters: { op: 'and', conditions },
           limit: 50,
         },
       },
@@ -710,6 +740,7 @@ app.post('/api/live-source', async (req, res) => {
                   workedAtCiti,
                   citiExperienceDetails: citiDetails,
                   sourcedFrom: `Live Crustdata API (${strat.url.replace('https://api.crustdata.com/', '')}) • ${company}`,
+                  isSynthetic: false,
                 };
               });
 
@@ -753,7 +784,13 @@ app.post('/api/live-source', async (req, res) => {
     });
   }
 
-  // Fallback intelligent talent generator for any role
+  // ---------------------------------------------------------------------------------
+  // DEMO DATA GENERATOR -- this produces entirely fictional candidates, NOT real
+  // sourced or verified people. It only runs when live Crustdata sourcing failed or
+  // returned nothing (no key, invalid key, or zero matches). Every candidate object
+  // returned from here is explicitly flagged isSynthetic: true so the UI/CSV can
+  // never present it as if it were a real profile.
+  // ---------------------------------------------------------------------------------
   const sampleNames = [
     'Aarav Sharma', 'Priya Sundaram', 'Rohan Mukherjee', 'Sneha Kulkarni',
     'Vikramaditya Rao', 'Ananya Iyer', 'Karthik Venkataraman', 'Divya Nair',
@@ -776,9 +813,11 @@ app.post('/api/live-source', async (req, res) => {
     const hasCiti = i === 1 || i === 4 || i === 7 || i === 12;
     const candSkills = [...mustHaveSkills.slice(0, Math.max(1, mustHaveSkills.length - (i % 2))), ...goodToHaveSkills.slice(0, 1 + (i % 3))];
 
+    const runNonce = Math.random().toString(36).slice(2, 8);
+
     return {
-      id: `cand-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}`,
-      name,
+      id: `demo-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}-${runNonce}`,
+      name: `[DEMO] ${name}`,
       email: `${name.toLowerCase().replace(/[^a-z0-9]/g, '.')}@${company.toLowerCase().replace(/[^a-z0-9]/g, '')}-talent.com`,
       phone: `+91 9840${(i + 1).toString().padStart(2, '0')} ${Math.floor(1000 + i * 423)}`,
       currentRole: `${yoe >= 8 ? 'Senior ' : ''}${role}`,
@@ -788,12 +827,15 @@ app.post('/api/live-source', async (req, res) => {
       country: 'India',
       skills: candSkills,
       summary: hasCiti
-        ? `Senior ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 4).join(', ')}. Past core banking engagement deployed on Citi systems.`
-        : `Experienced ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 5).join(', ')}. Strong delivery track record in enterprise systems.`,
+        ? `[SYNTHETIC DEMO PROFILE -- not a real person] Senior ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 4).join(', ')}. Past core banking engagement deployed on Citi systems.`
+        : `[SYNTHETIC DEMO PROFILE -- not a real person] Experienced ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 5).join(', ')}. Strong delivery track record in enterprise systems.`,
       education: 'Bachelor of Technology in Computer Science',
-      profileSourceUrl: `https://linkedin.com/in/${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
-      sourcedFrom: `Talent Sourcing Engine • ${company}`,
+      // Deliberately NOT a linkedin.com URL: this candidate is fabricated demo data,
+      // and a linkedin.com/in/... URL here would look like a real, clickable profile.
+      profileSourceUrl: `https://example.invalid/synthetic-demo-profile/${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+      sourcedFrom: `SYNTHETIC DEMO DATA (Crustdata unavailable) • ${company}`,
       isServiceCompany: true,
+      isSynthetic: true,
       workedAtCiti: hasCiti,
       citiExperienceDetails: hasCiti ? `Past role/client via ${company}: Citi Banking Technology (${Math.round(1.5 + (i % 3))} years)` : 'None',
     };
@@ -804,15 +846,16 @@ app.post('/api/live-source', async (req, res) => {
     count: generated.length,
     candidates: generated,
     rawCount: generated.length,
-    source: 'talent-engine',
+    source: 'synthetic-demo',
+    isSynthetic: true,
     debug: {
       apiKeyConfigured: !!effectiveCrustKey,
       apiKeyLength: effectiveCrustKey.length,
       attempts: debugLogs,
       finalStatus: debugLogs.length > 0 ? debugLogs[0].httpStatus : 0,
       verdict: effectiveCrustKey
-        ? `Crustdata live search returned 0 records or non-200 status. Showing talent pool.`
-        : `No Crustdata API key configured. Loaded high-precision talent pool for ${role}.`,
+        ? `Crustdata live search returned 0 records or a non-200 status. Showing SYNTHETIC demo data instead -- these are NOT real candidates.`
+        : `No Crustdata API key configured. Showing SYNTHETIC demo data for ${role} -- these are NOT real candidates.`,
     },
   });
 });
@@ -827,6 +870,8 @@ app.post('/api/google-verify-candidates', async (req, res) => {
   const effectiveGeminiKey = geminiApiKey || process.env.GEMINI_API_KEY;
   const ai = getGeminiClient(effectiveGeminiKey);
   const verifications: Record<string, any> = {};
+  let verificationAttempted = false;
+  let verificationErrorMsg = '';
 
   if (ai) {
     const candidateSummary = candidates.slice(0, 12).map((c: any) => ({
@@ -857,73 +902,80 @@ FOR EACH CANDIDATE:
 Return a JSON array conforming to the schema.
 `;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                candidateId: { type: Type.STRING },
-                status: { type: Type.STRING },
-                companyMatch: { type: Type.BOOLEAN },
-                verifiedCompany: { type: Type.STRING },
-                locationMatch: { type: Type.BOOLEAN },
-                verifiedLocation: { type: Type.STRING },
-                verifiedSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
-                skillsMatchConfidence: { type: Type.NUMBER },
-                searchQueryUsed: { type: Type.STRING },
-                guardrailVerdict: { type: Type.STRING },
-                groundingSnippets: { type: Type.ARRAY, items: { type: Type.STRING } },
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+    for (const model of modelsToTry) {
+      verificationAttempted = true;
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  candidateId: { type: Type.STRING },
+                  status: { type: Type.STRING },
+                  companyMatch: { type: Type.BOOLEAN },
+                  verifiedCompany: { type: Type.STRING },
+                  locationMatch: { type: Type.BOOLEAN },
+                  verifiedLocation: { type: Type.STRING },
+                  verifiedSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  skillsMatchConfidence: { type: Type.NUMBER },
+                  searchQueryUsed: { type: Type.STRING },
+                  guardrailVerdict: { type: Type.STRING },
+                  groundingSnippets: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['candidateId', 'status', 'companyMatch', 'locationMatch', 'guardrailVerdict'],
               },
-              required: ['candidateId', 'status', 'companyMatch', 'locationMatch', 'guardrailVerdict'],
             },
           },
-        },
-      });
+        });
 
-      if (response.text) {
-        const parsed = JSON.parse(response.text);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((item: any) => {
-            verifications[item.candidateId] = {
-              ...item,
-              checkedAt: new Date().toISOString(),
-            };
-          });
+        if (response.text) {
+          const parsed = JSON.parse(response.text);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((item: any) => {
+              verifications[item.candidateId] = {
+                ...item,
+                checkedAt: new Date().toISOString(),
+              };
+            });
+          }
+          quotaTracker.recordRequest(model, true, 200);
+          break; // got a real result, no need to try the fallback model
         }
+      } catch (err: any) {
+        verificationErrorMsg = err.message || 'Gemini verification error';
+        const is429 = verificationErrorMsg.includes('429') || verificationErrorMsg.includes('quota') || verificationErrorMsg.includes('RESOURCE_EXHAUSTED');
+        quotaTracker.recordRequest(model, false, is429 ? 429 : 500, verificationErrorMsg);
+        console.warn(`Google search verification notice (${model}):`, verificationErrorMsg);
       }
-    } catch (err: any) {
-      console.warn('Google search verification notice:', err.message);
     }
   }
 
-  // Fallback / standard verification completion for any profiles not returned
+  // HONESTY GUARDRAIL: any candidate Gemini did NOT actually return a real result for
+  // must be marked as not verified. We do NOT fabricate a "VERIFIED_MATCH" -- an
+  // unverified profile reported as verified is worse than no verification at all.
   for (const c of candidates) {
     if (!verifications[c.id]) {
-      const isKnownService = ['Cognizant', 'Infosys', 'Wipro', 'Capgemini', 'Accenture', 'IBM', 'Tech Mahindra', 'LTIMindtree'].some(
-        (comp) => (c.currentCompany || '').toLowerCase().includes(comp.toLowerCase())
-      );
       verifications[c.id] = {
         candidateId: c.id,
-        status: isKnownService ? 'VERIFIED_MATCH' : 'PARTIALLY_VERIFIED',
-        companyMatch: true,
-        verifiedCompany: c.currentCompany,
-        locationMatch: true,
-        verifiedLocation: c.location,
-        verifiedSkills: c.skills?.slice(0, 4) || [],
-        skillsMatchConfidence: isKnownService ? 95 : 88,
+        status: ai ? 'VERIFICATION_FAILED' : 'NOT_VERIFIED',
+        companyMatch: false,
+        verifiedCompany: undefined,
+        locationMatch: false,
+        verifiedLocation: undefined,
+        verifiedSkills: [],
+        skillsMatchConfidence: 0,
         searchQueryUsed: `site:linkedin.com/in "${c.name}" "${c.currentCompany}"`,
-        guardrailVerdict: `Google Search Cross-Check: Verified profile indexed at ${c.currentCompany} in ${c.location}. Core technical stack alignment confirmed.`,
-        groundingSnippets: [
-          `Public profile index match for ${c.name} (${c.currentRole}) at ${c.currentCompany}`,
-          `Location confirmed in ${c.location}; verified skills: ${c.skills?.slice(0, 3).join(', ')}`,
-        ],
+        guardrailVerdict: ai
+          ? `Gemini Google-Search verification could not confirm this profile${verificationErrorMsg ? ` (${verificationErrorMsg.slice(0, 140)})` : ''}. Treat as UNVERIFIED until manually checked.`
+          : 'No Gemini API key configured -- this profile has NOT been checked against any external source. Treat as UNVERIFIED.',
+        groundingSnippets: [],
         checkedAt: new Date().toISOString(),
       };
     }
@@ -933,6 +985,7 @@ Return a JSON array conforming to the schema.
     success: true,
     verifications,
     count: Object.keys(verifications).length,
+    verificationAttempted,
   });
 });
 
@@ -1012,7 +1065,7 @@ For each candidate, evaluate:
 
     let response: any = null;
     let modelUsed = 'gemini-3.1-flash-lite';
-    const modelsToTry = ['gemini-3.1-flash-lite'];
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-2.5-flash'];
 
     for (const model of modelsToTry) {
       try {
@@ -1114,7 +1167,7 @@ For each candidate, evaluate:
 });
 
 // 4. Server-side Python Program Runner with secure environment variables
-app.post('/api/run-python', async (req, res) => {
+app.post('/api/run-python', requireInternalToken, async (req, res) => {
   try {
     const { script, crustdataApiKey } = req.body;
 
@@ -1122,7 +1175,11 @@ app.post('/api/run-python', async (req, res) => {
       return res.status(400).json({ success: false, error: 'No python script provided' });
     }
 
-    const scriptPath = path.join(process.cwd(), 'pipeline.py');
+    // Write the generated script to a per-run temp file rather than overwriting the
+    // repo's checked-in pipeline.py -- that file previously got clobbered on every
+    // run, so `git diff` never reflected what had actually last executed.
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const scriptPath = path.join(os.tmpdir(), `rca_pipeline_run_${runId}.py`);
     await fs.promises.writeFile(scriptPath, script, 'utf-8');
 
     // Run Python process with server-side GEMINI_API_KEY from environment
@@ -1151,15 +1208,37 @@ app.post('/api/run-python', async (req, res) => {
 
     const timeout = setTimeout(() => {
       pythonProcess.kill('SIGTERM');
-    }, 60000);
+    }, 120000);
 
-    pythonProcess.on('close', (code) => {
+    pythonProcess.on('close', async (code) => {
       clearTimeout(timeout);
+
+      // The script prints its own OUTPUT_CSV_PATH; read that file back so the
+      // frontend can render the REAL rows the Python process produced, instead of
+      // re-deriving anything from parsed terminal text.
+      let csvContent: string | null = null;
+      let csvPath: string | null = null;
+      const csvPathMatch = script.match(/OUTPUT_CSV_PATH\s*=\s*os\.path\.expanduser\(\s*["']([^"']+)["']/);
+      if (csvPathMatch) {
+        const expandedPath = csvPathMatch[1].replace(/^~/, os.homedir());
+        try {
+          csvContent = await fs.promises.readFile(expandedPath, 'utf-8');
+          csvPath = expandedPath;
+        } catch {
+          // No CSV written (e.g. zero candidates sourced) -- not an error condition.
+        }
+      }
+
+      // Best-effort cleanup of the temp script; failures here are not user-facing.
+      fs.promises.unlink(scriptPath).catch(() => {});
+
       return res.json({
         success: code === 0,
         exitCode: code,
         stdout: stdoutData,
         stderr: stderrData,
+        csvPath,
+        csv: csvContent,
       });
     });
 
