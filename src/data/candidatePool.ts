@@ -107,7 +107,6 @@ export function generateCandidatePoolForRole(
       : 'None';
 
     const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-    const emailPrefix = name.toLowerCase().replace(/[^a-z0-9]/g, '.');
 
     // Pick candidate skill combinations
     const candMustHaves = i % 5 === 4
@@ -127,8 +126,6 @@ export function generateCandidatePoolForRole(
     candidates.push({
       id: `cand-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}`,
       name,
-      email: `${emailPrefix}@${company.toLowerCase().replace(/[^a-z0-9]/g, '')}-talent.com`,
-      phone: `+91 9840${(i + 1).toString().padStart(2, '0')} ${Math.floor(1000 + i * 423)}`,
       currentRole,
       currentCompany: company,
       experienceYears: yoe,

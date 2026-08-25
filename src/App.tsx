@@ -615,10 +615,9 @@ export default function App() {
     }
 
     if (!liveSourcingSuccess || liveCandidates.length === 0) {
-      const fallbackCandidates = generateCandidatePoolForRole(requirement.role, requirement);
-      liveCandidates = fallbackCandidates;
-      liveSourcingSuccess = true;
-      setCandidatePool((prev) => isMerge ? [...fallbackCandidates, ...prev] : fallbackCandidates);
+      liveCandidates = [];
+      liveSourcingSuccess = false;
+      setCandidatePool((prev) => isMerge ? prev : []);
     }
 
     // 3. Profiles Sourced Report
@@ -721,8 +720,20 @@ export default function App() {
           timestamp: getLogTimestamp(),
         },
         {
-          id: '6-batch',
-          text: `[*] Screening Batch 1/5 with Gemini 3.1 Flash-Lite (RPD: 1,500 | RPM: 15)...`,
+          id: '6-batch-1',
+          text: `[*] Screening Batch 1/3 (Profiles 1-4) with Gemini 3.1 Flash-Lite (RPD: 1,500 | RPM: 15)...`,
+          type: 'info',
+          timestamp: getLogTimestamp(),
+        },
+        {
+          id: '6-batch-2',
+          text: `[*] Screening Batch 2/3 (Profiles 5-8) with Gemini 3.1 Flash-Lite...`,
+          type: 'info',
+          timestamp: getLogTimestamp(),
+        },
+        {
+          id: '6-batch-3',
+          text: `[*] Screening Batch 3/3 (Profiles 9-12) with Gemini 3.1 Flash-Lite...`,
           type: 'info',
           timestamp: getLogTimestamp(),
         },

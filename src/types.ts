@@ -63,8 +63,6 @@ export interface GoogleVerificationResult {
 export interface CandidateProfile {
   id: string;
   name: string;
-  email: string;
-  phone: string;
   currentRole: string;
   currentCompany: string;
   experienceYears: number;

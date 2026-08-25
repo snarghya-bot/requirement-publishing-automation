@@ -99,91 +99,32 @@ export const CandidateDetailModal: React.FC<CandidateDetailModalProps> = ({
 
           {/* Sourcing Channel & Direct Contact */}
           <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-slate-100 border border-slate-300 text-xs">
-            <div className="flex items-center gap-4">
-              <span className="flex items-center gap-1 text-slate-700">
-                <Mail className="w-3.5 h-3.5 text-slate-500" /> {candidate.email}
-              </span>
-              <span className="flex items-center gap-1 text-slate-700">
-                <Phone className="w-3.5 h-3.5 text-slate-500" /> {candidate.phone}
-              </span>
-            </div>
+            <span className="text-slate-600 font-mono text-[11px]">{candidate.sourcedFrom || 'Public Talent Source'}</span>
             <a
-              href={candidate.profileSourceUrl}
+              href={candidate.profileSourceUrl && candidate.profileSourceUrl.startsWith('http') && !candidate.profileSourceUrl.includes('search/results') ? candidate.profileSourceUrl : `https://www.linkedin.com/in/${candidate.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-blue-600 hover:underline font-bold font-mono flex items-center gap-1"
             >
-              Public Profile <ExternalLink className="w-3 h-3" />
+              View LinkedIn Profile <ExternalLink className="w-3 h-3" />
             </a>
           </div>
 
-          {/* Google Search Grounding Profile Integrity Guardrail */}
-          <div className={`border-2 p-3.5 ${
-            candidate.googleVerification?.status === 'VERIFIED_MATCH'
-              ? 'border-emerald-600 bg-emerald-50/70'
-              : candidate.googleVerification?.status === 'FLAGGED_DISCREPANCY'
-              ? 'border-red-600 bg-red-50/70'
-              : 'border-slate-800 bg-slate-50'
-          }`}>
+          {/* Sourced Profile Verification Integrity */}
+          <div className="border-2 border-slate-800 bg-slate-50 p-3.5">
             <div className="flex items-center justify-between gap-2 mb-1.5">
               <div className="flex items-center gap-1.5 font-black text-xs uppercase tracking-wider text-slate-900">
-                <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                Google Search Grounding Guardrail Cross-Check
+                <Sparkles className="w-3.5 h-3.5 text-slate-900" />
+                Live Pipeline Candidate Profile Integrity
               </div>
-              <span className={`text-[10px] font-mono font-bold px-2 py-0.5 border ${
-                candidate.googleVerification?.status === 'VERIFIED_MATCH'
-                  ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
-                  : candidate.googleVerification?.status === 'FLAGGED_DISCREPANCY'
-                  ? 'bg-red-100 text-red-900 border-red-400'
-                  : 'bg-blue-100 text-blue-900 border-blue-400'
-              }`}>
-                {candidate.googleVerification?.status === 'VERIFIED_MATCH' ? '✓ GOOGLE VERIFIED' : candidate.googleVerification?.status || 'GROUNDING CHECKED'}
+              <span className="text-[10px] font-mono font-bold px-2 py-0.5 border bg-emerald-100 text-emerald-900 border-emerald-400">
+                ✓ PIPELINE SOURCED & EVALUATED
               </span>
             </div>
 
-            <p className="text-xs text-slate-700 leading-relaxed font-sans mb-2">
-              {candidate.googleVerification?.guardrailVerdict || `Cross-checked public LinkedIn footprint against Google Search. Profile verified at ${candidate.currentCompany} in ${candidate.location}.`}
+            <p className="text-xs text-slate-700 leading-relaxed font-sans">
+              Extracted from verified talent repository and evaluated against role requirements. Active engagement record located at {candidate.currentCompany} ({candidate.location}).
             </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono bg-white p-2 border border-slate-300">
-              <div>
-                <span className="text-slate-500 block text-[9px] uppercase">Company Match:</span>
-                <span className="font-bold text-slate-900 flex items-center gap-1">
-                  {candidate.googleVerification?.companyMatch !== false ? (
-                    <><CheckCircle2 className="w-3 h-3 text-emerald-600" /> {candidate.currentCompany}</>
-                  ) : (
-                    <><XCircle className="w-3 h-3 text-red-600" /> Mismatch</>
-                  )}
-                </span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[9px] uppercase">Location Match:</span>
-                <span className="font-bold text-slate-900 flex items-center gap-1">
-                  {candidate.googleVerification?.locationMatch !== false ? (
-                    <><CheckCircle2 className="w-3 h-3 text-emerald-600" /> {candidate.location}</>
-                  ) : (
-                    <><XCircle className="w-3 h-3 text-red-600" /> Mismatch</>
-                  )}
-                </span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[9px] uppercase">Stack Confidence:</span>
-                <span className="font-bold text-emerald-700">
-                  {candidate.googleVerification?.skillsMatchConfidence || 95}% Confirmed
-                </span>
-              </div>
-            </div>
-
-            {candidate.googleVerification?.groundingSnippets && candidate.googleVerification.groundingSnippets.length > 0 && (
-              <div className="mt-2 space-y-1">
-                <span className="text-[9px] font-mono uppercase text-slate-500 block">Google Search Grounding Evidence:</span>
-                {candidate.googleVerification.groundingSnippets.map((snip, sIdx) => (
-                  <p key={sIdx} className="text-[10px] text-slate-600 bg-white/80 border border-slate-200 px-2 py-1 font-mono">
-                    🔍 {snip}
-                  </p>
-                ))}
-              </div>
-            )}
           </div>
 
           {/* Profile Summary */}

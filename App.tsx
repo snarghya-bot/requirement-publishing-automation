@@ -219,17 +219,17 @@ export default function App() {
       const rLower = requirement.role.toLowerCase();
       const roleSlug = requirement.role.toLowerCase().replace(/[^a-z0-9]/g, '-');
       if (c.id.startsWith(`cand-${roleSlug}`) || c.id.startsWith(`demo-${roleSlug}`)) return true;
-      if (requirement.role === 'Java Developer') return c.id.includes('cand-java') || c.id.includes('demo-java') || c.currentRole.toLowerCase().includes('java');
-      if (requirement.role === '.NET Developer') return c.id.includes('cand-dotnet') || c.id.includes('demo-dotnet') || c.currentRole.toLowerCase().includes('.net');
-      if (requirement.role === 'DevOps') return c.id.includes('cand-devops') || c.id.includes('demo-devops') || c.currentRole.toLowerCase().includes('devops');
-      if (requirement.role === 'Production Support') return c.id.includes('cand-prod') || c.id.includes('demo-prod') || c.currentRole.toLowerCase().includes('support');
-      if (requirement.role === 'Unix/SQL/Autosys') return c.id.includes('unix') || c.currentRole.toLowerCase().includes('unix') || c.currentRole.toLowerCase().includes('autosys');
-      if (requirement.role === 'Cloud') return c.id.includes('cand-cloud') || c.id.includes('demo-cloud') || c.currentRole.toLowerCase().includes('cloud');
-      if (requirement.role === 'Mainframe Developer/Support') return c.id.includes('mf') || c.id.includes('mainframe') || c.currentRole.toLowerCase().includes('mainframe');
-      if (requirement.role === 'Automation Test Engineer') return c.id.includes('qa') || c.id.includes('automation') || c.currentRole.toLowerCase().includes('test');
-      if (requirement.role === 'Kafka STE / L3 Admin') return c.id.includes('kafka') || c.currentRole.toLowerCase().includes('kafka');
+      if (requirement.role === 'Java Developer') return c.id.includes('cand-java') || c.id.includes('demo-java') || (c.currentRole || '').toLowerCase().includes('java');
+      if (requirement.role === '.NET Developer') return c.id.includes('cand-dotnet') || c.id.includes('demo-dotnet') || (c.currentRole || '').toLowerCase().includes('.net');
+      if (requirement.role === 'DevOps') return c.id.includes('cand-devops') || c.id.includes('demo-devops') || (c.currentRole || '').toLowerCase().includes('devops');
+      if (requirement.role === 'Production Support') return c.id.includes('cand-prod') || c.id.includes('demo-prod') || (c.currentRole || '').toLowerCase().includes('support');
+      if (requirement.role === 'Unix/SQL/Autosys') return c.id.includes('unix') || (c.currentRole || '').toLowerCase().includes('unix') || (c.currentRole || '').toLowerCase().includes('autosys');
+      if (requirement.role === 'Cloud') return c.id.includes('cand-cloud') || c.id.includes('demo-cloud') || (c.currentRole || '').toLowerCase().includes('cloud');
+      if (requirement.role === 'Mainframe Developer/Support') return c.id.includes('mf') || c.id.includes('mainframe') || (c.currentRole || '').toLowerCase().includes('mainframe');
+      if (requirement.role === 'Automation Test Engineer') return c.id.includes('qa') || c.id.includes('automation') || (c.currentRole || '').toLowerCase().includes('test');
+      if (requirement.role === 'Kafka STE / L3 Admin') return c.id.includes('kafka') || (c.currentRole || '').toLowerCase().includes('kafka');
       
-      return c.currentRole.toLowerCase().includes(rLower) || c.skills.some(s => requirement.mustHaveSkills.some(m => m.toLowerCase() === s.toLowerCase()));
+      return (c.currentRole || '').toLowerCase().includes(rLower) || (Array.isArray(c.skills) ? c.skills : []).some(s => (requirement.mustHaveSkills || []).some(m => m.toLowerCase() === (s || '').toLowerCase()));
     });
 
     if (matched.length === 0) {
@@ -240,8 +240,8 @@ export default function App() {
     if (requirement.targetCompanies.length > 0) {
       const lowerTargets = requirement.targetCompanies.map((c) => c.toLowerCase());
       matched = [...matched].sort((a, b) => {
-        const aMatches = lowerTargets.some((tc) => a.currentCompany.toLowerCase().includes(tc));
-        const bMatches = lowerTargets.some((tc) => b.currentCompany.toLowerCase().includes(tc));
+        const aMatches = lowerTargets.some((tc) => (a.currentCompany || '').toLowerCase().includes(tc));
+        const bMatches = lowerTargets.some((tc) => (b.currentCompany || '').toLowerCase().includes(tc));
         if (aMatches && !bMatches) return -1;
         if (!aMatches && bMatches) return 1;
         return 0;

@@ -41,24 +41,25 @@ export function parseTerminalOrCsvOutput(rawText: string): ParseResult {
         .filter((_, i, arr) => i > 0 && i < arr.length - 1); // remove outer empty items
 
       if (cols.length >= 6) {
-        // Format: [No., Candidate Name, Verdict, Score, YoE, Country, Current Employer, Citi Exp?, LinkedIn URL]
+        // Format: [No., Candidate Name, Verdict, Score, YoE, Current Employer, Citi Exp?] (7 cols) or more
         let name = cols[1] || cols[0];
         let verdict = cols[2] || 'POTENTIAL MATCH';
         let scoreStr = cols[3] || '75';
         let yoeStr = cols[4] || '5';
-        let country = cols[5] || 'India';
-        let company = cols[6] || 'Enterprise Services';
-        let citiExpStr = cols[7] || 'No';
-        let linkedin = cols[8] || `https://linkedin.com/in/${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+        let company = cols[5] || cols[6] || 'Enterprise Services';
+        let citiExpStr = cols[6] || cols[7] || 'No';
+        let country = 'India';
+        const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        let linkedin = cols[8] && cols[8].startsWith('http') ? cols[8] : `https://www.linkedin.com/in/${slug}`;
 
-        // If columns shifted because No wasn't first:
-        if (isNaN(Number(scoreStr)) && !isNaN(Number(cols[2]))) {
-          name = cols[0];
-          verdict = 'QUALIFIED';
-          scoreStr = cols[2];
-          yoeStr = cols[3];
-          company = cols[4];
-          country = cols[5];
+        if (cols.length === 7) {
+          name = cols[1];
+          verdict = cols[2];
+          scoreStr = cols[3];
+          yoeStr = cols[4];
+          company = cols[5];
+          citiExpStr = cols[6];
+          linkedin = `https://www.linkedin.com/in/${slug}`;
         }
 
         const score = parseInt(scoreStr.replace(/[^0-9]/g, ''), 10) || 75;
@@ -71,13 +72,11 @@ export function parseTerminalOrCsvOutput(rawText: string): ParseResult {
         const candidate: CandidateProfile = {
           id: candidateId,
           name,
-          email: `${name.toLowerCase().replace(/[^a-z0-9]/g, '.')}@talent-source.io`,
-          phone: `+91 98400 ${Math.floor(10000 + Math.random() * 90000)}`,
           currentRole: 'Production Support Specialist',
           currentCompany: company,
           experienceYears: yoe,
           location: `${country}`,
-          country: country === 'USA' ? 'USA' : country === 'UK' ? 'UK' : country === 'Canada' ? 'Canada' : 'India',
+          country: 'India',
           skills: [
             'Incident & Problem Management (ITIL)',
             'Linux / Unix Shell Scripting',
@@ -89,8 +88,8 @@ export function parseTerminalOrCsvOutput(rawText: string): ParseResult {
           ],
           summary: `${yoe} years of production application support at ${company}. Evaluated match score: ${score}%.`,
           education: 'Bachelor of Engineering',
-          profileSourceUrl: linkedin.startsWith('http') ? linkedin : `https://${linkedin}`,
-          sourcedFrom: `Imported Terminal Run • ${company}`,
+          profileSourceUrl: linkedin,
+          sourcedFrom: `Live Pipeline Run • ${company}`,
           isServiceCompany: true,
           workedAtCiti,
         };
@@ -153,8 +152,6 @@ export function parseTerminalOrCsvOutput(rawText: string): ParseResult {
         candidates.push({
           id: candidateId,
           name,
-          email: `${name.toLowerCase().replace(/[^a-z0-9]/g, '.')}@talent-source.io`,
-          phone: `+91 98400 ${Math.floor(10000 + Math.random() * 90000)}`,
           currentRole: 'Production Support Specialist',
           currentCompany: company,
           experienceYears: yoe,
