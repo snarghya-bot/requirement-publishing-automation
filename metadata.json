@@ -1,0 +1,6 @@
+{
+  "name": "Requirement Consolidated Automation",
+  "description": "Consolidated automation tool for technical JD specification, Python candidate sourcing script generation, profile extraction, reverse JD validation, and automated email dispatch.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
