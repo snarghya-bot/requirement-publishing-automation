@@ -249,14 +249,16 @@ app.post('/api/test-keys', async (req, res) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch('https://api.crustdata.com/screener/persondb/search', {
+      // Matches the confirmed-working shape used in /api/live-source (Bearer auth,
+      // "field" filter key, /person/search) -- see the comment there for why.
+      const response = await fetch('https://api.crustdata.com/person/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Token ${effectiveCrustKey}`,
+          Authorization: `Bearer ${effectiveCrustKey}`,
         },
         body: JSON.stringify({
-          filters: { op: 'and', conditions: [{ filter_type: 'region', type: '=', value: 'India' }] },
+          filters: { op: 'and', conditions: [{ field: 'basic_profile.location.country', type: '=', value: 'India' }] },
           limit: 1,
         }),
         signal: controller.signal,
@@ -592,6 +594,106 @@ app.post('/api/gemini-quota/reset', (req, res) => {
   });
 });
 
+// 1b. Gemini-driven search context builder: takes a role name (+ optional JD text)
+// and generates the STRUCTURED skill/title keywords Crustdata's filter API needs --
+// it does NOT hand Crustdata free-text "expanded context", because Crustdata's filter
+// API takes exact field/type/value conditions, not prose. This replaces having to
+// hand-maintain a hardcoded skills list per role with a per-request, Gemini-generated
+// one that the user can still see and edit before it's used. Honesty guardrail matches
+// the rest of this file: no key / call failure returns an explicit empty result with
+// usedFallback: true, never a fabricated skill list.
+app.post('/api/generate-search-context', async (req, res) => {
+  const { role, customJd, geminiApiKey } = req.body;
+
+  if (!role || typeof role !== 'string' || !role.trim()) {
+    return res.status(400).json({ success: false, error: 'role is required' });
+  }
+
+  const effectiveGeminiKey = geminiApiKey || process.env.GEMINI_API_KEY;
+  const ai = getGeminiClient(effectiveGeminiKey);
+
+  const emptyResult = {
+    mustHaveSkills: [] as string[],
+    goodToHaveSkills: [] as string[],
+  };
+
+  if (!ai) {
+    return res.json({
+      success: true,
+      usedFallback: true,
+      note: 'No Gemini API key configured -- cannot auto-generate skill keywords for this role. Enter skills manually below, or add a Gemini key first.',
+      ...emptyResult,
+    });
+  }
+
+  const prompt = `
+You are building a STRUCTURED candidate-search filter, not writing prose. Given a job
+role (and optionally a job description), produce the concrete technical skill keywords
+and tools a candidate search API should filter on for this role.
+
+ROLE: "${role}"
+${customJd ? `JOB DESCRIPTION:\n${customJd}` : '(No job description provided -- infer from the role title alone.)'}
+
+Return two arrays:
+1. mustHaveSkills: 5-8 short, specific, canonical skill/tool names that are strictly
+   required for this role (e.g. "COBOL Programming", "Kubernetes (K8s)", "Autosys (JIL syntax & job scheduling)").
+   Each item should be a short keyword phrase suitable for matching against a LinkedIn
+   skills list or headline -- NOT a sentence, NOT a soft requirement.
+2. goodToHaveSkills: 5-8 additional bonus/complementary skill or tool names for the same role.
+
+Do not include generic soft skills (e.g. "communication", "teamwork"). Do not include
+the role title itself as a skill. Keep each entry under 6 words.
+`;
+
+  const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+  let lastErrorMsg = '';
+
+  for (const model of modelsToTry) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              mustHaveSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+              goodToHaveSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['mustHaveSkills', 'goodToHaveSkills'],
+          },
+        },
+      });
+
+      if (response.text) {
+        const parsed = JSON.parse(response.text);
+        quotaTracker.recordRequest(model, true, 200);
+        return res.json({
+          success: true,
+          usedFallback: false,
+          generatedBy: model,
+          mustHaveSkills: Array.isArray(parsed.mustHaveSkills) ? parsed.mustHaveSkills : [],
+          goodToHaveSkills: Array.isArray(parsed.goodToHaveSkills) ? parsed.goodToHaveSkills : [],
+        });
+      }
+    } catch (err: any) {
+      lastErrorMsg = err.message || 'Gemini error';
+      const is429 = lastErrorMsg.includes('429') || lastErrorMsg.includes('quota') || lastErrorMsg.includes('RESOURCE_EXHAUSTED');
+      quotaTracker.recordRequest(model, false, is429 ? 429 : 500, lastErrorMsg);
+      continue;
+    }
+  }
+
+  // Both models failed -- honest empty result, not a guess.
+  return res.json({
+    success: true,
+    usedFallback: true,
+    note: `Gemini could not generate skill keywords for this role (${lastErrorMsg.slice(0, 140)}). Enter skills manually below.`,
+    ...emptyResult,
+  });
+});
+
 // 2. Live Candidate Sourcing via Crustdata API (with Full Debug Logging)
 app.post('/api/live-source', async (req, res) => {
   const {
@@ -622,26 +724,49 @@ app.post('/api/live-source', async (req, res) => {
   let sourcingSucceeded = false;
 
   if (effectiveCrustKey) {
-    // Documented Crustdata contract: POST /screener/persondb/search, "Authorization: Token <key>",
-    // filter objects keyed by "filter_type" (not "field"), inside a top-level "filters" object.
-    const authHeader = `Token ${effectiveCrustKey.replace(/^(Token|Bearer)\s+/i, '')}`;
+    // Crustdata contract: POST /person/search, "Authorization: Bearer <key>", filter
+    // objects keyed by "field" (not "filter_type"). This shape is confirmed working
+    // from a live run against a real Crustdata key (2026-08-25) -- an earlier version
+    // of this endpoint used a different, unverified shape ("filter_type" / Token auth /
+    // /screener/persondb/search) sourced from a third-party doc mirror that was never
+    // actually tested. If Crustdata's own docs say otherwise, trust them over this
+    // comment -- but this exact shape has returned real candidate data at least once.
+    const authHeader = `Bearer ${effectiveCrustKey.replace(/^(Token|Bearer)\s+/i, '')}`;
 
-    const conditions: any[] = [];
+    const conditions: any[] = [
+      { field: 'basic_profile.headline', type: '(.)', value: role },
+    ];
     if (location && location !== 'Remote / Any') {
-      conditions.push({ filter_type: 'region', type: '=', value: location });
+      conditions.push({ field: 'basic_profile.location.country', type: '=', value: location });
     } else {
-      conditions.push({ filter_type: 'region', type: '=', value: 'India' });
+      conditions.push({ field: 'basic_profile.location.country', type: '=', value: 'India' });
     }
     if (targetCompanies.length > 0) {
-      conditions.push({ filter_type: 'current_employers.company_name', type: 'in', value: targetCompanies });
+      conditions.push({ field: 'experience.employment_details.current.company_name', type: 'in', value: targetCompanies });
     }
     if (mustHaveSkills.length > 0) {
-      conditions.push({ filter_type: 'skills', type: 'in', value: mustHaveSkills.slice(0, 8) });
+      conditions.push({ field: 'skills.professional_network_skills', type: 'in', value: mustHaveSkills.slice(0, 8) });
     }
+    // Deterministic exclusions -- NOT left to the LLM or to per-role config. TCS is a
+    // non-negotiable exclusion enforced elsewhere in this file (isCompanyForbidden);
+    // currently-employed-at-Citi is excluded per the same rule the Python pipeline and
+    // /api/live-validate's prompt both enforce (past Citi experience is fine/valued,
+    // current Citi employment is a disqualifier). This endpoint previously sent NEITHER
+    // exclusion to Crustdata at all.
+    conditions.push({
+      field: 'experience.employment_details.current.company_name',
+      type: 'not_in',
+      value: ['Tata Consultancy Services', 'TCS', 'Tata Consultancy Services (TCS)'],
+    });
+    conditions.push({
+      field: 'experience.employment_details.current.company_name',
+      type: 'not_in',
+      value: ['Citi', 'Citigroup', 'Citibank', 'Citi India', 'Citi Tech'],
+    });
 
     const strategies = [
       {
-        url: 'https://api.crustdata.com/screener/persondb/search',
+        url: 'https://api.crustdata.com/person/search',
         payload: {
           filters: { op: 'and', conditions },
           limit: 50,
@@ -782,6 +907,16 @@ app.post('/api/live-source', async (req, res) => {
     });
   }
 
+  // ---------------------------------------------------------------------------------
+  // HONESTY FIX: this block generates entirely fictional candidates and only runs when
+  // live Crustdata sourcing failed or returned nothing above. A prior version of this
+  // block labeled these fabricated profiles `isSynthetic: false`, gave them real-looking
+  // linkedin.com/in/... URLs, and reported a fabricated success verdict ("Crustdata
+  // returned records... verified profiles") regardless of whether Crustdata was ever
+  // actually reached. That is the exact silent-fabrication bug this app was audited for
+  // -- reintroduced here in a form that actively lies (isSynthetic: false is worse than
+  // just omitting the field). Every candidate below is now explicitly flagged.
+  // ---------------------------------------------------------------------------------
   const sampleNames = [
     'Aarav Sharma', 'Priya Sundaram', 'Rohan Mukherjee', 'Sneha Kulkarni',
     'Vikramaditya Rao', 'Ananya Iyer', 'Karthik Venkataraman', 'Divya Nair',
@@ -803,8 +938,8 @@ app.post('/api/live-source', async (req, res) => {
     const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
 
     return {
-      id: `talent-pool-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}-${Date.now().toString().slice(-4)}`,
-      name,
+      id: `demo-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}-${Date.now().toString().slice(-4)}`,
+      name: `[DEMO] ${name}`,
       currentRole: `${yoe >= 8 ? 'Senior ' : ''}${role}`,
       currentCompany: company,
       experienceYears: yoe,
@@ -812,14 +947,16 @@ app.post('/api/live-source', async (req, res) => {
       country: 'India',
       skills: candSkills.length > 0 ? candSkills : ['Core Technical Skills', 'Enterprise Architecture', 'Production Support'],
       summary: hasCiti
-        ? `Senior ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 4).join(', ')}. Past core engagement deployed on Citi banking systems.`
-        : `Experienced ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 5).join(', ')}. Strong delivery track record in enterprise systems.`,
+        ? `[SYNTHETIC DEMO PROFILE -- not a real person] Senior ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 4).join(', ')}. Past core engagement deployed on Citi banking systems.`
+        : `[SYNTHETIC DEMO PROFILE -- not a real person] Experienced ${role} at ${company} with ${yoe} years in ${candSkills.slice(0, 5).join(', ')}. Strong delivery track record in enterprise systems.`,
       education: 'Bachelor of Technology in Computer Science',
-      profileSourceUrl: `https://www.linkedin.com/in/${slug}-${Math.floor(1000 + i * 37)}`,
+      // Deliberately NOT a linkedin.com URL -- this is fabricated demo data, and a
+      // linkedin.com/in/... URL here would look like a real, clickable profile.
+      profileSourceUrl: `https://example.invalid/synthetic-demo-profile/${slug}`,
       workedAtCiti: hasCiti,
       citiExperienceDetails: hasCiti ? `Past role/client via ${company}: Citi Banking Technology (${Math.round(1.5 + (i % 3))} years)` : 'None',
-      sourcedFrom: `Talent Repository & API Connector • ${company}`,
-      isSynthetic: false,
+      sourcedFrom: `SYNTHETIC DEMO DATA (Crustdata unavailable) • ${company}`,
+      isSynthetic: true,
     };
   });
 
@@ -828,16 +965,16 @@ app.post('/api/live-source', async (req, res) => {
     count: fallbackCands.length,
     candidates: fallbackCands,
     rawCount: fallbackCands.length,
-    source: 'talent-repository-live',
-    isSynthetic: false,
+    source: 'synthetic-demo',
+    isSynthetic: true,
     debug: {
       apiKeyConfigured: !!effectiveCrustKey,
       apiKeyLength: effectiveCrustKey.length,
       attempts: debugLogs,
-      finalStatus: 200,
+      finalStatus: debugLogs.length > 0 ? debugLogs[0].httpStatus : 0,
       verdict: effectiveCrustKey
-        ? `Crustdata returned records. Sourced ${fallbackCands.length} verified profiles from talent repository matching exact role & skill criteria.`
-        : `Sourced ${fallbackCands.length} professional candidate profiles from verified talent repository matching exact role & skill criteria.`,
+        ? `Crustdata live search returned 0 records or a non-200 status. Showing SYNTHETIC demo data instead -- these are NOT real candidates.`
+        : `No Crustdata API key configured. Showing SYNTHETIC demo data for ${role} -- these are NOT real candidates.`,
     },
   });
 });
@@ -941,48 +1078,31 @@ Return a JSON array conforming to the schema.
     }
   }
 
-  // HONESTY & FALLBACK GUARDRAIL: if verification failed due to rate limits or quota (429), or no ai, apply heuristic fallback verification
-  const isQuotaError = verificationErrorMsg.includes('429') || verificationErrorMsg.includes('quota') || verificationErrorMsg.includes('RESOURCE_EXHAUSTED');
-
+  // HONESTY GUARDRAIL: any candidate Gemini did NOT actually return a real result for
+  // must be marked as not verified -- regardless of WHY it failed (quota/429, network
+  // error, or no key at all). A prior version of this block fabricated a "VERIFIED_MATCH"
+  // with invented confidence scores and fake grounding evidence specifically for the
+  // quota-exceeded case (the single most common failure mode on the free tier) -- that
+  // is the exact fabrication bug this app was audited for. An unverified profile
+  // reported as verified is worse than no verification at all. Do not reintroduce it.
   for (const c of candidates) {
     if (!verifications[c.id]) {
-      if (isQuotaError || !ai) {
-        verifications[c.id] = {
-          candidateId: c.id,
-          status: 'VERIFIED_MATCH',
-          companyMatch: true,
-          verifiedCompany: c.currentCompany,
-          locationMatch: true,
-          verifiedLocation: c.location || 'India',
-          verifiedSkills: c.skills || [],
-          skillsMatchConfidence: 90,
-          searchQueryUsed: `site:linkedin.com/in "${c.name}" "${c.currentCompany}"`,
-          guardrailVerdict: `Profile verified via robust heuristic cross-check (Gemini Free Tier Quota 429 handled gracefully). Employer and skills align with real profile data.`,
-          groundingSnippets: [
-            `Verified professional background at ${c.currentCompany} matching profile location and skillset.`,
-            `Active technical profile match for ${c.currentRole || 'professional role'}.`
-          ],
-          checkedAt: new Date().toISOString(),
-          fallbackMode: true,
-        };
-      } else {
-        verifications[c.id] = {
-          candidateId: c.id,
-          status: 'VERIFICATION_FAILED',
-          companyMatch: false,
-          verifiedCompany: undefined,
-          locationMatch: false,
-          verifiedLocation: undefined,
-          verifiedSkills: [],
-          skillsMatchConfidence: 0,
-          searchQueryUsed: `site:linkedin.com/in "${c.name}" "${c.currentCompany}"`,
-          guardrailVerdict: ai
-            ? `Gemini Google-Search verification could not confirm this profile${verificationErrorMsg ? ` (${verificationErrorMsg.slice(0, 140)})` : ''}. Treat as UNVERIFIED until manually checked.`
-            : 'No Gemini API key configured -- this profile has NOT been checked against any external source. Treat as UNVERIFIED.',
-          groundingSnippets: [],
-          checkedAt: new Date().toISOString(),
-        };
-      }
+      verifications[c.id] = {
+        candidateId: c.id,
+        status: ai ? 'VERIFICATION_FAILED' : 'NOT_VERIFIED',
+        companyMatch: false,
+        verifiedCompany: undefined,
+        locationMatch: false,
+        verifiedLocation: undefined,
+        verifiedSkills: [],
+        skillsMatchConfidence: 0,
+        searchQueryUsed: `site:linkedin.com/in "${c.name}" "${c.currentCompany}"`,
+        guardrailVerdict: ai
+          ? `Gemini Google-Search verification could not confirm this profile${verificationErrorMsg ? ` (${verificationErrorMsg.slice(0, 140)})` : ''}. Treat as UNVERIFIED until manually checked.`
+          : 'No Gemini API key configured -- this profile has NOT been checked against any external source. Treat as UNVERIFIED.',
+        groundingSnippets: [],
+        checkedAt: new Date().toISOString(),
+      };
     }
   }
 

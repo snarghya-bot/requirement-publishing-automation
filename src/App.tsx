@@ -1226,6 +1226,7 @@ export default function App() {
         initialRoleConfig={editingRoleConfig}
         existingRoles={availableRolesList}
         onShowToast={showToast}
+        geminiApiKey={apiKeysConfig.geminiApiKey}
       />
     </div>
   );

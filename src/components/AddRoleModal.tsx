@@ -23,6 +23,11 @@ interface AddRoleModalProps {
   initialRoleConfig?: RoleConfig | null;
   existingRoles: { role: string; isCustom: boolean }[];
   onShowToast: (msg: string) => void;
+  /** Gemini key used to auto-generate must-have / good-to-have skill keywords for
+   * whatever role name + JD text is currently in the form. Optional -- if empty, the
+   * "Generate with Gemini" button still shows but the backend returns an honest
+   * "no key configured" result instead of fabricating skills. */
+  geminiApiKey?: string;
 }
 
 const TEMPLATE_PRESETS: {
@@ -120,6 +125,7 @@ export const AddRoleModal: React.FC<AddRoleModalProps> = ({
   initialRoleConfig,
   existingRoles,
   onShowToast,
+  geminiApiKey,
 }) => {
   const [roleName, setRoleName] = useState('');
   const [roleTitle, setRoleTitle] = useState('');
@@ -130,6 +136,7 @@ export const AddRoleModal: React.FC<AddRoleModalProps> = ({
   const [newGoodToHave, setNewGoodToHave] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isGeneratingSkills, setIsGeneratingSkills] = useState(false);
 
   const isEditing = Boolean(initialRoleConfig);
   const isCustomRole = initialRoleConfig
@@ -215,6 +222,59 @@ export const AddRoleModal: React.FC<AddRoleModalProps> = ({
 
   const handleRemoveGoodToHaveSkill = (skill: string) => {
     setGoodToHaveSkills(goodToHaveSkills.filter((s) => s !== skill));
+  };
+
+  // Calls Gemini (server-side) to generate must-have / good-to-have skill keywords
+  // from the role name + JD text currently in the form, and merges them into the
+  // existing tag lists (deduped, additive -- never overwrites what's already there).
+  const handleGenerateWithGemini = async () => {
+    const cleanRoleName = roleName.trim();
+    if (!cleanRoleName) {
+      onShowToast('Enter a Role Name first so Gemini knows what to generate skills for.');
+      return;
+    }
+
+    setIsGeneratingSkills(true);
+    try {
+      const res = await fetch('/api/generate-search-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          role: cleanRoleName,
+          customJd: jdText.trim() || undefined,
+          geminiApiKey,
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        onShowToast(`Gemini skill generation failed: ${data.error || 'Unknown error'}`);
+        return;
+      }
+
+      if (data.usedFallback) {
+        onShowToast(data.note || 'Gemini could not generate skills -- add a Gemini API key first, or enter skills manually.');
+        return;
+      }
+
+      const newMust = (data.mustHaveSkills || []).filter((s: string) => !mustHaveSkills.includes(s));
+      const newGood = (data.goodToHaveSkills || []).filter((s: string) => !goodToHaveSkills.includes(s));
+
+      if (newMust.length > 0) setMustHaveSkills((prev) => [...prev, ...newMust]);
+      if (newGood.length > 0) setGoodToHaveSkills((prev) => [...prev, ...newGood]);
+
+      if (newMust.length === 0 && newGood.length === 0) {
+        onShowToast(`Gemini (${data.generatedBy}) had nothing new to add -- these skills are already listed.`);
+      } else {
+        onShowToast(
+          `✓ Gemini (${data.generatedBy}) added ${newMust.length} must-have + ${newGood.length} good-to-have skill${newMust.length + newGood.length === 1 ? '' : 's'}. Review and edit below before saving.`
+        );
+      }
+    } catch (err: any) {
+      onShowToast(`Gemini skill generation error: ${err.message || 'Network error'}`);
+    } finally {
+      setIsGeneratingSkills(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -384,6 +444,29 @@ export const AddRoleModal: React.FC<AddRoleModalProps> = ({
               placeholder="Enter comprehensive job description requirements..."
               className="w-full border-2 border-slate-900 p-2.5 text-xs font-sans text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-slate-900"
             />
+          </div>
+
+          {/* Gemini-driven skill generation -- reads Role Name + JD above, calls
+              /api/generate-search-context, and adds returned skills to the tag lists
+              below. Purely additive and always editable. */}
+          <div className="border border-dashed border-emerald-400 bg-emerald-50/60 p-3 flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <p className="text-[11px] text-emerald-950">
+                <strong>Generate skills with Gemini:</strong> uses the Role Name and JD above to suggest
+                must-have / good-to-have skill keywords. Suggestions are added to the lists below for you
+                to review, edit, or remove -- nothing is added silently.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleGenerateWithGemini}
+              disabled={isGeneratingSkills}
+              className="shrink-0 border-2 border-emerald-600 bg-emerald-400 hover:bg-emerald-300 text-emerald-950 px-3 py-2 text-[11px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{isGeneratingSkills ? 'Generating...' : 'Generate with Gemini'}</span>
+            </button>
           </div>
 
           {/* 3. MUST-HAVE SKILLS BUILDER */}

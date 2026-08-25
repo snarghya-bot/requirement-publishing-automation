@@ -123,20 +123,29 @@ export function generateCandidatePoolForRole(
       ? `${currentRole} at ${company} with ${yoe} years of hands-on experience in ${candSkills.slice(0, 4).join(', ')}. Led core banking services delivery with past project deployment on Citi enterprise platforms.`
       : `${currentRole} at ${company} with ${yoe} years of extensive industry experience specializing in ${candSkills.slice(0, 5).join(', ')}. Strong background in scalable architecture, peer code reviews, and high-volume systems.`;
 
+    // Runtime-unique suffix so repeated generations don't collide on id/url.
+    const runNonce = Math.random().toString(36).slice(2, 8);
+
     candidates.push({
-      id: `cand-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}`,
-      name,
+      id: `cand-${role.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${i + 1}-${runNonce}`,
+      // HONESTY FIX: this function generates entirely fictional candidates -- it is the
+      // in-browser fallback pool, not real sourced data. Every field below must make
+      // that unmistakable: [DEMO] name prefix, a summary that says so up front, an
+      // .invalid placeholder URL (never a real-looking linkedin.com URL), and
+      // isSynthetic: true so the UI/CSV never presents this as a real profile.
+      name: `[DEMO] ${name}`,
       currentRole,
       currentCompany: company,
       experienceYears: yoe,
       location,
       country: 'India',
       skills: candSkills,
-      summary,
+      summary: `[SYNTHETIC DEMO PROFILE -- not a real person] ${summary}`,
       education: 'Bachelor of Technology in Computer Science & Engineering',
-      profileSourceUrl: `https://linkedin.com/in/${slug}`,
-      sourcedFrom: `Talent Sourcing Engine • ${company}`,
+      profileSourceUrl: `https://example.invalid/synthetic-demo-profile/${slug}`,
+      sourcedFrom: `SYNTHETIC DEMO DATA (Crustdata unavailable) • ${company}`,
       isServiceCompany: true,
+      isSynthetic: true,
       workedAtCiti: hasCiti,
       citiExperienceDetails: citiDetails,
     });

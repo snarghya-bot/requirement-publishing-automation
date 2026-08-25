@@ -47,7 +47,7 @@ export interface SourcingRequirement {
 }
 
 export interface GoogleVerificationResult {
-  status: 'VERIFIED_MATCH' | 'FLAGGED_DISCREPANCY' | 'PARTIALLY_VERIFIED' | 'NOT_CHECKED';
+  status: 'VERIFIED_MATCH' | 'FLAGGED_DISCREPANCY' | 'PARTIALLY_VERIFIED' | 'NOT_CHECKED' | 'NOT_VERIFIED' | 'VERIFICATION_FAILED';
   verifiedCompany?: string;
   companyMatch: boolean;
   verifiedLocation?: string;
@@ -78,6 +78,10 @@ export interface CandidateProfile {
   workedAtCiti?: boolean;
   citiExperienceDetails?: string;
   googleVerification?: GoogleVerificationResult;
+  /** True when this candidate is fabricated demo/placeholder data (Crustdata was unavailable
+   * or returned nothing) rather than a real sourced profile. Must always be surfaced to the
+   * user -- never silently blended in with real candidates. */
+  isSynthetic?: boolean;
 }
 
 export interface SkillMatchDetail {
